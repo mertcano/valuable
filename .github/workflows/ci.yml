@@ -22,11 +22,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
+# Least privilege default for every job below. Without this block each job runs
+# with the repository default token -- often write-all -- even though six of the
+# seven jobs only compile and test the workspace. That matters here because this
+# workflow runs on `pull_request`, and `cargo test --all-features` executes build
+# scripts, proc macros and test code from the branch under review; a read-only
+# token means none of that can reach repository write access. The one job that
+# genuinely publishes something, `codegen`, raises the scopes for itself.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust
         run: rustup update stable
       - run: cargo test --all-features --workspace
@@ -35,9 +45,9 @@ jobs:
   minrust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install cargo-hack
-        uses: taiki-e/install-action@cargo-hack
+        uses: taiki-e/install-action@b6dc1834c131bd3090eb7c41a7be7aadfd9e329d # cargo-hack
       - run: cargo hack check --workspace --all-features --ignore-private --rust-version
 
   no-std:
@@ -51,11 +61,11 @@ jobs:
           - thumbv7m-none-eabi
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust
         run: rustup update stable
       - name: Install cargo-hack
-        uses: taiki-e/install-action@cargo-hack
+        uses: taiki-e/install-action@b6dc1834c131bd3090eb7c41a7be7aadfd9e329d # cargo-hack
       - run: rustup target add ${{ matrix.target }}
       - run: cargo hack build --target ${{ matrix.target }} --feature-powerset --skip std,default
         working-directory: valuable
@@ -65,18 +75,38 @@ jobs:
   features:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust
         run: rustup update stable
       - name: Install cargo-hack
-        uses: taiki-e/install-action@cargo-hack
+        uses: taiki-e/install-action@b6dc1834c131bd3090eb7c41a7be7aadfd9e329d # cargo-hack
       - run: cargo hack build --workspace --feature-powerset
 
   # When this job failed, run ci/no_atomic.sh and commit result changes.
   codegen:
     runs-on: ubuntu-latest
+    # The only job here that writes anything:
+    #   contents: write        -- the regenerated no_atomic.rs is committed and
+    #                             pushed to a branch by create-pull-request
+    #   pull-requests: write   -- create-pull-request opens the PR itself
+    #
+    # These scopes cannot be narrowed by trigger: GitHub does not evaluate
+    # `${{ }}` expressions inside a `permissions:` block, so the scopes declared
+    # here apply to every run of this job, including the `pull_request` runs
+    # where the write steps are skipped by their `if:` conditions. Two facts
+    # bound the resulting exposure: GitHub issues a read-only token to
+    # `pull_request` runs originating from forks regardless of this block, and
+    # the write steps below are additionally gated on
+    # `github.repository_owner == 'tokio-rs' && github.event_name == 'schedule'`.
+    # Splitting the publish steps into their own job gated on the schedule event
+    # would remove the residual grant on same-repository pull requests; that is
+    # recorded as follow-up rather than attempted here, because it changes the
+    # job graph and cannot be validated without running Actions.
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust
         run: rustup update stable
       - run: ci/no_atomic.sh
@@ -90,10 +120,24 @@ jobs:
           if ! git diff --exit-code; then
               git add .
               git commit -m "Update no_atomic.rs"
-              echo "::set-output name=success::false"
+              # Was `echo "::set-output name=success::false"`. The `set-output`
+              # workflow command was deprecated by GitHub in October 2022 in
+              # favour of writing to the $GITHUB_OUTPUT file; it emits a
+              # deprecation warning on every run and is scheduled for removal,
+              # at which point `steps.diff.outputs.success` would silently
+              # become empty and the create-pull-request step below would stop
+              # firing -- with no failure to notice, because the `if:` would
+              # simply evaluate false and the job would still report green.
+              # The replacement is the documented file-append form.
+              echo "success=false" >> "$GITHUB_OUTPUT"
           fi
         if: github.repository_owner == 'tokio-rs' && github.event_name == 'schedule'
-      - uses: peter-evans/create-pull-request@v6
+      # Pinned by digest instead of the mutable `v6` tag, which the maintainer
+      # advances onto each new v6.x release. This action runs with the write
+      # scopes declared above, so an unreviewed change to whatever `v6` points
+      # at would execute with permission to push branches and open pull requests
+      # in this repository.
+      - uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         with:
           title: Update no_atomic.rs
           body: |
@@ -108,7 +152,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust
         run: rustup update stable
       - run: cargo fmt --all --check
@@ -116,7 +160,7 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust
         run: rustup update nightly && rustup default nightly
       - run: cargo doc --no-deps --all-features
